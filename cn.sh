@@ -50,10 +50,13 @@ create_ipset() {
     local family=$2
     local file=$3
 
-    ipset destroy "$set_name" 2>/dev/null || true
-    if ! ipset create "$set_name" hash:net family "$family" maxelem 1000000; then
-        echo "创建ipset集合失败: $set_name"
-        exit 1
+    if ! ipset list "$set_name" &>/dev/null; then
+        if ! ipset create "$set_name" hash:net family "$family" maxelem 1000000; then
+            echo "创建ipset集合失败: $set_name"
+            exit 1
+        fi
+    else
+        echo "ipset集合已存在: $set_name"
     fi
 
     echo "导入 $file 到 $set_name..."
