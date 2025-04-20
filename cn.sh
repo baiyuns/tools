@@ -4,7 +4,7 @@ set -eo pipefail
 # 定义资源地址
 CHNROUTE_V4_URL="https://github.com/mayaxcn/china-ip-list/raw/master/chnroute.txt"
 
-# 安装依赖 :cite[2]
+# 安装依赖
 install_deps() {
     for pkg in curl ipset; do
         if ! command -v $pkg >/dev/null; then
@@ -25,7 +25,7 @@ download_cidrs() {
     local url=$1
     local file=$2
     echo "下载 $file..."
-    
+
     if ! curl -sSL --retry 3 --connect-timeout 30 "$url" -o "/tmp/$file"; then
         echo "下载失败: $url"
         exit 1
@@ -36,7 +36,7 @@ download_cidrs() {
         exit 1
     fi
 
-    # 验证CIDR格式 :cite[2]
+    # 验证CIDR格式
     if grep -qvE '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "/tmp/$file"; then
         echo "检测到非标准CIDR格式: $file"
         exit 1
@@ -64,12 +64,10 @@ create_ipset() {
     done
 }
 
-
 # 配置防火墙规则
 configure_firewall() {
     # 备份当前规则
     iptables-save > /tmp/iptables.backup
-    ip6tables-save > /tmp/ip6tables.backup
 
     # IPv4规则
     iptables -F
@@ -79,40 +77,34 @@ configure_firewall() {
     iptables -A INPUT -p tcp --dport 22 -j ACCEPT  # SSH放行
     iptables -A INPUT -m set --match-set china_ips_v4 src -j ACCEPT
 
-    # IPv6规则
-    ip6tables -F
-    ip6tables -P INPUT DROP
-    ip6tables -A INPUT -i lo -j ACCEPT
-    ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    ip6tables -A INPUT -p tcp --dport 22 -j ACCEPT  # SSH放行
-    ip6tables -A INPUT -m set --match-set china_ips_v6 src -j ACCEPT
+    # 屏蔽所有IPv6流量
+    echo "屏蔽所有IPv6流量..."
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1
+    sysctl -w net.ipv6.conf.default.disable_ipv6=1
+    sysctl -w net.ipv6.conf.lo.disable_ipv6=1
 }
 
 # 主流程
 main() {
     install_deps
     download_cidrs "$CHNROUTE_V4_URL" "chnroute.txt"
-    download_cidrs "$CHNROUTE_V6_URL" "chnroute_v6.txt"
 
     create_ipset "china_ips_v4" "inet4" "chnroute.txt"
-    create_ipset "china_ips_v6" "inet6" "chnroute_v6.txt"
 
     configure_firewall
 
     echo "测试连接..."
-    if ! curl -4 -s --retry 2 --connect-timeout 10 https://ip.sb >/dev/null || \
-       ! curl -6 -s --retry 2 --connect-timeout 10 https://ip.sb >/dev/null; then
+    if ! curl -4 -s --retry 2 --connect-timeout 10 https://ip.sb >/dev/null; then
         echo "测试失败，恢复规则..."
         iptables-restore < /tmp/iptables.backup
-        ip6tables-restore < /tmp/ip6tables.backup
         exit 1
     fi
 
     echo "配置成功！规则已生效："
     echo "- SSH(22端口)允许所有IP访问"
-    echo "- 其他入站端口仅允许中国IP访问:cite[2]"
+    echo "- 其他入站端口仅允许中国IP访问"
     echo "- 出站流量无限制"
-    echo "- 规则备份文件: /tmp/iptables.backup /tmp/ip6tables.backup"
+    echo "- 规则备份文件: /tmp/iptables.backup"
 }
 
 main "$@"
