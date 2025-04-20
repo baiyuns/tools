@@ -3,7 +3,6 @@ set -eo pipefail
 
 # 定义资源地址
 CHNROUTE_V4_URL="https://github.com/mayaxcn/china-ip-list/raw/master/chnroute.txt"
-CHNROUTE_V6_URL="https://github.com/mayaxcn/china-ip-list/raw/master/chnroute_v6.txt"
 
 # 安装依赖 :cite[2]
 install_deps() {
