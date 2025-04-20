@@ -57,8 +57,9 @@ create_ipset() {
     fi
 
     echo "导入 $file 到 $set_name..."
-    # 使用 sort 和 uniq 去重后再导入
-    sort "/tmp/$file" | uniq | sed "s/^/add $set_name /" | ipset restore -exist
+    sort -u "/tmp/$file" | while read -r cidr; do
+        ipset add "$set_name" "$cidr" -exist
+    done
 }
 
 
