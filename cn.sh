@@ -57,8 +57,10 @@ create_ipset() {
     fi
 
     echo "导入 $file 到 $set_name..."
-    sed "s/^/add $set_name /" "/tmp/$file" | ipset restore -exist
+    # 使用 sort 和 uniq 去重后再导入
+    sort "/tmp/$file" | uniq | sed "s/^/add $set_name /" | ipset restore -exist
 }
+
 
 # 配置防火墙规则
 configure_firewall() {
