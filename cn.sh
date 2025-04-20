@@ -89,7 +89,7 @@ main() {
     install_deps
     download_cidrs "$CHNROUTE_V4_URL" "chnroute.txt"
 
-    create_ipset "china_ips_v4" "inet4" "chnroute.txt"
+    create_ipset "china_ips_v4" "inet" "chnroute.txt"
 
     configure_firewall
 
