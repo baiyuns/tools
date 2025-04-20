@@ -8,6 +8,17 @@ CIDR_URL_V4="https://github.com/mayaxcn/china-ip-list/raw/master/chnroute.txt"
 CIDR_URL_V6="https://github.com/mayaxcn/china-ip-list/raw/master/chnroute_v6.txt"
 LOCK_FILE="/tmp/ipset.lock"
 
+# 检查是否安装了 ipset
+if ! command -v ipset >/dev/null 2>&1; then
+    echo -e "\033[31m[ERROR]\033[0m ipset 未安装，请安装后重试。"
+    echo "安装方法:"
+    echo "Debian/Ubuntu: sudo apt update && sudo apt install ipset"
+    echo "CentOS/Red Hat: sudo yum install ipset"
+    echo "Fedora: sudo dnf install ipset"
+    echo "Alpine: sudo apk add ipset"
+    exit 1
+fi
+
 # 获取IPset版本
 IPSET_VERSION=$(ipset --version | awk '{print $NF}' | cut -d'.' -f2)
 [ -z "$IPSET_VERSION" ] && IPSET_VERSION=0
