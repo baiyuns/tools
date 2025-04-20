@@ -29,14 +29,17 @@ wget -q -O /tmp/chn_ip.txt https://raw.githubusercontent.com/mayaxcn/china-ip-li
 wget -q -O /tmp/chn_ip_v6.txt https://raw.githubusercontent.com/mayaxcn/china-ip-list/master/chn_ip_v6.txt
 wget -q -O /tmp/chnroute_v6.txt https://raw.githubusercontent.com/mayaxcn/china-ip-list/master/chnroute_v6.txt
 
-# 创建 ipset 集合
+# 创建 ipset 集合，如果已经存在则销毁旧集合并重新创建
 echo "创建 ipset 集合..."
+ipset destroy china_ips 2>/dev/null
 ipset create china_ips hash:net maxelem 1000000
 
-# 加载中国大陆 IP 列表到 ipset
+# 加载中国大陆 IP 列表到 ipset（避免重复添加）
 echo "加载中国大陆 IP 列表到 ipset..."
 for ip in $(cat /tmp/chnroute.txt); do
-    ipset add china_ips $ip
+    if ! ipset test china_ips "$ip" &>/dev/null; then
+        ipset add china_ips "$ip"
+    fi
 done
 
 # 设置防火墙规则
