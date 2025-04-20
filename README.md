@@ -1,1 +1,1 @@
-wget https://github.com/baiyuns/cn/cn.sh && bash cn.sh
+wget https://github.com/baiyuns/cn/tree/main && bash cn.sh
