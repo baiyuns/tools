@@ -1,11 +1,11 @@
 #!/bin/bash
-# AlmaLinux 虚拟机网络桥接一键配置脚本 v4.0
-# 支持：自动接口检测 | 双栈IPv4/IPv6 | 安全加固 | 日志审计
+# AlmaLinux 9.5 虚拟机网络桥接一键配置脚本 v4.1
+# 适配 NetworkManager 架构
 
 # 初始化参数
 IPTABLES_FILE="/etc/sysconfig/iptables"
 SYSCTL_FILE="/etc/sysctl.conf"
-NETPLAN_FILE="/etc/sysconfig/network-scripts/ifcfg-vmbr0"
+NETPLAN_FILE="/etc/NetworkManager/system-connections/vmbr0.nmconnection"
 LOG_FILE="/var/log/vm_bridge_setup.log"
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
@@ -27,7 +27,7 @@ check_permissions() {
         error_exit "必须使用root权限运行"
     fi
 
-    for cmd in ip iptables iptables-save sysctl; do
+    for cmd in ip iptables iptables-save sysctl nmcli; do
         if ! command -v "$cmd" &> /dev/null; then
             error_exit "缺少必要工具: $cmd"
         fi
@@ -56,47 +56,25 @@ detect_interfaces() {
     log "桥接接口: $BRIDGE_IFACE"
 }
 
-# 配置网络参数（替换原错误部分）
+# 配置网络参数（关键修正部分）
 configure_network() {
     log "配置网络参数..."
     
-    # IPv4设置
-    nmcli con add type bridge ifname vmbr0 ipv4.addresses 10.1.1.1/24 ipv4.gateway 10.1.1.254 ipv4.dns 8.8.8.8
-    nmcli con modify vmbr0 ipv4.method manual
-
+    # IPv4设置（使用 nmcli 替代传统配置）
+    nmcli con add type bridge ifname "$BRIDGE_IFACE" ipv4.addresses 10.1.1.1/24 \
+        ipv4.gateway 10.1.1.254 ipv4.dns 8.8.8.8 --autoconnect
+    
     # IPv6设置
-    nmcli con modify vmbr0 ipv6.addresses 2001:41d0:2:cf5a::1/64
-    nmcli con modify vmbr0 ipv6.method manual
+    nmcli con modify "$BRIDGE_IFACE" ipv6.addresses 2001:41d0:2:cf5a::1/64 \
+        ipv6.gateway 2001:41d0:2:cf5a::1 ipv6.method manual
 
-    # 启用IP转发
-    sysctl -w net.ipv6.conf.all.forwarding=1
-    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
-
-    # 应用配置
-    nmcli connection up vmbr0
-}
-
-    # IPv6设置
+    # 启用IP转发（双重保障）
     sysctl -w net.ipv6.conf.all.forwarding=1
     echo "net.ipv6.conf.all.forwarding=1" >> "$SYSCTL_FILE"
+    sysctl -p  # 立即生效
 
-    # 持久化配置
-    systemctl restart network
-}
-
-# 设置NAT规则
-setup_nat() {
-    log "配置NAT规则..."
-    
-    # IPv4 NAT
-    iptables -t nat -A POSTROUTING -o "$PUBLIC_IFACE" -j MASQUERADE
-    iptables-save > "$IPTABLES_FILE"
-
-    # IPv6 NAT
-    ip6tables -t nat -A POSTROUTING -o "$PUBLIC_IFACE" -j MASQUERADE
-    ip6tables-save > "/etc/sysconfig/ip6tables"
-
-    log "NAT规则已生效"
+    # 应用配置
+    nmcli connection up "$BRIDGE_IFACE"
 }
 
 # 防火墙配置
@@ -126,7 +104,6 @@ main() {
     check_permissions
     detect_interfaces
     configure_network
-    setup_nat
     configure_firewall
 
     log "===== 网络桥接配置成功 ====="
