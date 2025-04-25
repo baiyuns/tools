@@ -56,18 +56,25 @@ detect_interfaces() {
     log "桥接接口: $BRIDGE_IFACE"
 }
 
-# 配置网络参数
+# 配置网络参数（替换原错误部分）
 configure_network() {
     log "配置网络参数..."
     
     # IPv4设置
-    cat > "$NETPLAN_FILE" <<EOF
-DEVICE=$BRIDGE_IFACE
-TYPE=Bridge
-BOOTPROTO=dhcp
-ONBOOT=yes
-DELAY=0
-EOF
+    nmcli con add type bridge ifname vmbr0 ipv4.addresses 10.1.1.1/24 ipv4.gateway 10.1.1.254 ipv4.dns 8.8.8.8
+    nmcli con modify vmbr0 ipv4.method manual
+
+    # IPv6设置
+    nmcli con modify vmbr0 ipv6.addresses 2001:41d0:2:cf5a::1/64
+    nmcli con modify vmbr0 ipv6.method manual
+
+    # 启用IP转发
+    sysctl -w net.ipv6.conf.all.forwarding=1
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+
+    # 应用配置
+    nmcli connection up vmbr0
+}
 
     # IPv6设置
     sysctl -w net.ipv6.conf.all.forwarding=1
