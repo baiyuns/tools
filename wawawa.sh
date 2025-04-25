@@ -1,5 +1,5 @@
 #!/bin/bash
-# AlmaLinux 9.5 虚拟机网络桥接一键配置脚本 v4.1
+# AlmaLinux 9.5 虚拟机网络桥接一键配置脚本 v4.2
 # 适配 NetworkManager 架构
 
 # 初始化参数
@@ -25,7 +25,7 @@ error_exit() {
 check_permissions() {
     if [ "$(id -u)" != "0" ]; then
         error_exit "必须使用root权限运行"
-    fi
+    }
 
     for cmd in ip iptables iptables-save sysctl nmcli; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -56,25 +56,25 @@ detect_interfaces() {
     log "桥接接口: $BRIDGE_IFACE"
 }
 
-# 配置网络参数（关键修正部分）
+# 配置网络参数（关键修正）
 configure_network() {
     log "配置网络参数..."
     
-    # IPv4设置（使用 nmcli 替代传统配置）
-    nmcli con add type bridge ifname "$BRIDGE_IFACE" ipv4.addresses 10.1.1.1/24 \
+    # IPv4设置（修正参数格式）
+    nmcli con add type bridge ifname vmbr0 con-name vmbr0 ipv4.addresses 10.1.1.1/24 \
         ipv4.gateway 10.1.1.254 ipv4.dns 8.8.8.8 --autoconnect
     
-    # IPv6设置
-    nmcli con modify "$BRIDGE_IFACE" ipv6.addresses 2001:41d0:2:cf5a::1/64 \
-        ipv6.gateway 2001:41d0:2:cf5a::1 ipv6.method manual
+    # IPv6设置（修正参数格式）
+    nmcli con modify vmbr0 ipv6.addresses 2001:41d0:2:cf5a::1/64 \
+        ipv6.gateway 2001:41d0:2:cf5a::1 ipv6.method manual --autoconnect
 
     # 启用IP转发（双重保障）
     sysctl -w net.ipv6.conf.all.forwarding=1
-    echo "net.ipv6.conf.all.forwarding=1" >> "$SYSCTL_FILE"
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
     sysctl -p  # 立即生效
 
     # 应用配置
-    nmcli connection up "$BRIDGE_IFACE"
+    nmcli connection up vmbr0
 }
 
 # 防火墙配置
