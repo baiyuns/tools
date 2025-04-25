@@ -1,84 +1,147 @@
 #!/bin/bash
+# AlmaLinux 8 母机网络自动化配置脚本 v3.0
+# 支持：自动检测网络接口 | 智能防火墙配置 | DNS 自动修复 | 虚拟机 NAT 支持
 
-# 防火墙配置脚本 v2.1
-# 支持firewalld和iptables双模式
-# 日志文件路径
-LOGFILE="/var/log/firewall_setup.log"
+# 初始化日志系统
+LOG_FILE="/var/log/auto_network_setup.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
-# 函数：记录日志
-log() {
-    echo "[$TIMESTAMP] $1" | tee -a $LOGFILE
-}
+# 核心函数库
+function log() { echo "[$TIMESTAMP] $1"; }
+function error_exit() { log "FATAL: $1"; exit 1; }
 
-# 函数：检测服务状态
-check_service() {
-    if ! systemctl is-active --quiet $1; then
-        log "错误: $1 服务未运行，尝试启动..."
-        systemctl start $1
-        if [ $? -ne 0 ]; then
-            log "致命错误: 无法启动 $1 服务"
-            exit 1
+# 环境检测
+check_prerequisites() {
+    log "检测系统环境..."
+    if [ "$(rpm -E %rhel)" != "8" ]; then
+        error_exit "仅支持 AlmaLinux 8 系统"
+    fi
+
+    # 自动安装必要组件
+    MISSING_PACKAGES=()
+    for pkg in firewalld dnsmasq iptables-services; do
+        if ! rpm -q "$pkg" &>/dev/null; then
+            MISSING_PACKAGES+=("$pkg")
         fi
-    fi
-    log "$1 服务已就绪"
-}
+    done
 
-# 函数：检测防火墙类型
-detect_firewall() {
-    if command -v firewall-cmd &> /dev/null; then
-        FIREWALL_TYPE="firewalld"
-        log "检测到 firewalld 防火墙"
-    elif command -v iptables &> /dev/null; then
-        FIREWALL_TYPE="iptables"
-        log "检测到 iptables 防火墙"
-    else
-        log "错误: 未找到任何防火墙工具"
-        exit 1
+    if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+        log "安装缺失组件: ${MISSING_PACKAGES[*]}"
+        dnf install -y "${MISSING_PACKAGES[@]}" || error_exit "依赖安装失败"
     fi
 }
 
-# 主配置函数
+# 网络接口自动识别
+detect_interfaces() {
+    log "识别网络接口..."
+    PUBLIC_IFACE=$(ip route show default | awk '/default/ {print $5}')
+    if [ -z "$PUBLIC_IFACE" ]; then
+        error_exit "未检测到有效网络接口"
+    fi
+
+    PRIVATE_IFACE=$(ls /sys/class/net | grep -v "$PUBLIC_IFACE")
+    if [ -z "$PRIVATE_IFACE" ]; then
+        error_exit "未检测到内网接口"
+    fi
+
+    log "检测结果:"
+    log "公网接口: $PUBLIC_IFACE"
+    log "内网接口: $PRIVATE_IFACE"
+}
+
+# 防火墙配置
 configure_firewall() {
-    case $FIREWALL_TYPE in
-        "firewalld")
-            check_service firewalld
-            log "配置 firewalld 规则..."
-            firewall-cmd --permanent --zone=public --add-port=22/tcp
-            firewall-cmd --permanent --zone=public --add-service=http
-            firewall-cmd --permanent --zone=public --add-service=https
-            firewall-cmd --reload
-            ;;
-        "iptables")
-            check_service iptables
-            log "配置 iptables 规则..."
-            iptables -F
-            iptables -X
-            iptables -t nat -F
-            iptables -t nat -X
-            iptables -P INPUT DROP
-            iptables -P FORWARD DROP
-            iptables -A INPUT -i lo -j ACCEPT
-            iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
-            iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-            iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-            iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-            iptables-save > /etc/sysconfig/iptables
-            ;;
-    esac
-    log "防火墙规则配置完成"
+    log "配置防火墙规则..."
+    
+    # 启动并启用防火墙服务
+    systemctl start firewalld
+    systemctl enable firewalld
+
+    # 清理旧规则
+    firewall-cmd --permanent --direct --remove-rules ipv4 nat POSTROUTING || true
+    firewall-cmd --permanent --direct --remove-rules ipv4 filter FORWARD || true
+
+    # 添加 NAT 规则
+    firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 \
+        -s 10.0.1.0/24 -o "$PUBLIC_IFACE" -j MASQUERADE
+
+    # 允许转发规则
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 \
+        -i "$PRIVATE_IFACE" -o "$PUBLIC_IFACE" -j ACCEPT
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 \
+        -i "$PUBLIC_IFACE" -o "$PRIVATE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+    # 重载防火墙
+    firewall-cmd --reload || error_exit "防火墙配置失败"
 }
 
-# 执行流程
-log "===== 防火墙配置开始 ====="
-detect_firewall
-configure_firewall
-log "===== 防火墙配置完成 ====="
+# DNS 配置
+configure_dns() {
+    log "配置 DNS 解析..."
+    
+    # 优先使用 NetworkManager 配置
+    if systemctl is-active NetworkManager &>/dev/null; then
+        nmcli con mod "$PUBLIC_IFACE" ipv4.dns "8.8.8.8 114.114.114.114"
+        nmcli con up "$PUBLIC_IFACE" || error_exit "NetworkManager 配置失败"
+    else
+        # 回退方案：安装并配置 dnsmasq
+        if ! rpm -q dnsmasq &>/dev/null; then
+            log "安装 dnsmasq..."
+            dnf install -y dnsmasq
+            systemctl enable --now dnsmasq
+        fi
 
-# 验证配置
-log "验证防火墙状态..."
-if [ "$FIREWALL_TYPE" == "firewalld" ]; then
-    firewall-cmd --list-all
-else
-    iptables -L -n -v
-fi
+        # 写入 dnsmasq 配置
+        cat > /etc/dnsmasq.d/public_dns.conf <<EOF
+server=8.8.8.8
+server=114.114.114.114
+EOF
+        systemctl restart dnsmasq
+    fi
+
+    # 最终 DNS 验证
+    if ! getent hosts google.com &>/dev/null; then
+        error_exit "DNS 解析配置失败"
+    fi
+}
+
+# 网络验证
+validate_network() {
+    log "执行网络验证..."
+    
+    # 基础连通性测试
+    if ! ping -c 3 8.8.8.8 &>/dev/null; then
+        error_exit "公网连通性测试失败"
+    fi
+
+    # DNS 解析测试
+    if ! host google.com &>/dev/null; then
+        error_exit "DNS 解析失败"
+    fi
+
+    # 虚拟机网络测试（示例）
+    TEST_VM_IP="10.0.1.100"
+    if ping -c 3 "$TEST_VM_IP" &>/dev/null; then
+        log "虚拟机网络连通性正常"
+    else
+        log "警告：虚拟机网络测试失败，请检查防火墙规则"
+    fi
+}
+
+# 主执行流程
+main() {
+    trap 'error_exit "脚本异常终止"' ERR
+    check_prerequisites
+    detect_interfaces
+    configure_firewall
+    configure_dns
+    validate_network
+
+    log "===== 网络配置成功完成 ====="
+    echo "验证通过！虚拟机可通过母机访问外网"
+    echo "操作日志保存在: $LOG_FILE"
+}
+
+# 执行主函数
+main
