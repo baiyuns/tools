@@ -1,9 +1,5 @@
 #!/bin/bash
-# AlmaLinux 8 母机网络一键配置脚本（增强版）
-
-# 退出代码约定：
-# 0=成功 1=权限不足 2=参数错误 3=关键操作失败
-set -eo pipefail
+# AlmaLinux 8 母机网络一键配置脚本（终极版）
 
 # 初始化日志记录
 LOG_FILE="/var/log/nat_setup.log"
@@ -26,7 +22,7 @@ check_dependencies() {
   local missing=()
   
   # 检测必要软件包
-  for pkg in firewalld; do
+  for pkg in firewalld iptables-services; do
     if ! rpm -q "$pkg" &>/dev/null; then
       missing+=("$pkg")
     fi
@@ -36,7 +32,7 @@ check_dependencies() {
   if [ ${#missing[@]} -gt 0 ]; then
     echo "正在安装缺失依赖: ${missing[*]}..."
     dnf install -y "${missing[@]}" || {
-      echo "依赖安装失败，请手动执行: dnf install -y ${missing[*]}" >&2
+      echo "依赖安装失败，请手动执行: dnf install -y ${missing[@]}" >&2
       exit 3
     }
   fi
@@ -85,22 +81,49 @@ setup_kernel() {
   sysctl -p >/dev/null
 }
 
-# 防火墙及 NAT 配置
+# 防火墙及 NAT 配置（多模式支持）
 setup_firewall() {
   echo "配置防火墙规则..."
   
+  # 尝试使用 firewalld
+  if firewall-cmd --state &>/dev/null; then
+    # 清理旧规则
+    firewall-cmd --permanent --direct --remove-rules ipv4 nat POSTROUTING || true
+    firewall-cmd --permanent --direct --remove-rules ipv4 filter FORWARD || true
+    
+    # 添加新规则
+    firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s "$PRIVATE_NET" -o "$PUBLIC_IFACE" -j MASQUERADE
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i br0 -o "$PUBLIC_IFACE" -j ACCEPT
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$PUBLIC_IFACE" -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+    
+    # 应用配置
+    if ! firewall-cmd --reload; then
+      echo "警告：firewalld 配置失败，尝试回退到 iptables" >&2
+      fallback_to_iptables
+    fi
+  else
+    echo "firewalld 未安装，使用 iptables 配置..."
+    fallback_to_iptables
+  fi
+}
+
+# iptables 回退方案
+fallback_to_iptables() {
+  echo "配置 iptables 规则..."
   # 清理旧规则
-  firewall-cmd --permanent --direct --remove-rules ipv4 nat POSTROUTING || true
-  firewall-cmd --permanent --direct --remove-rules ipv4 filter FORWARD || true
+  iptables -t nat -F POSTROUTING
+  iptables -t filter -F FORWARD
   
-  # 添加新规则
-  firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s "$PRIVATE_NET" -o "$PUBLIC_IFACE" -j MASQUERADE
-  firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i br0 -o "$PUBLIC_IFACE" -j ACCEPT
-  firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$PUBLIC_IFACE" -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+  # 添加 NAT 规则
+  iptables -t nat -A POSTROUTING -s "$PRIVATE_NET" -o "$PUBLIC_IFACE" -j MASQUERADE
   
-  # 应用配置
-  if ! firewall-cmd --reload; then
-    echo "错误：防火墙重载失败，请检查规则" >&2
+  # 添加转发规则
+  iptables -A FORWARD -i br0 -o "$PUBLIC_IFACE" -j ACCEPT
+  iptables -A FORWARD -i "$PUBLIC_IFACE" -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+  
+  # 保存规则
+  if ! service iptables save; then
+    echo "错误：iptables 规则保存失败" >&2
     exit 3
   fi
 }
