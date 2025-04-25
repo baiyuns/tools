@@ -2,4 +2,4 @@
 
  wget https://raw.githubusercontent.com/baiyuns/tools/master/atport.sh && bash atport.sh
 
-  wget https://raw.githubusercontent.com/baiyuns/tools/master/muji.sh && bash muji.sh
+  wget https://raw.githubusercontent.com/baiyuns/tools/master/waftp.sh && bash waftp.sh
