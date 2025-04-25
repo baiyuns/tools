@@ -1,183 +1,84 @@
 #!/bin/bash
-# AlmaLinux 8 母机网络一键配置脚本（终极版）
 
-# 初始化日志记录
-LOG_FILE="/var/log/nat_setup.log"
-exec > >(tee -a "$LOG_FILE") 2>&1
+# 防火墙配置脚本 v2.1
+# 支持firewalld和iptables双模式
+# 日志文件路径
+LOGFILE="/var/log/firewall_setup.log"
+TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
-# 检查 root 权限
-if [ "$EUID" -ne 0 ]; then
-  echo "错误：必须使用 root 权限运行此脚本" >&2
-  exit 1
-fi
+# 函数：记录日志
+log() {
+    echo "[$TIMESTAMP] $1" | tee -a $LOGFILE
+}
 
-# 配置参数（用户可修改）
-PRIVATE_NET="10.0.1.0/24"    # 内网子网
-PUBLIC_IFACE=$(ip route show default | awk '/default/ {print $5}' | head -n1)  # 自动检测公网接口
-GATEWAY_IP="10.0.1.1"        # 内网网关地址
-DNS_SERVERS=("8.8.8.8" "114.114.114.114")  # 首选和备用 DNS
-
-# 预检系统组件
-check_dependencies() {
-  local missing=()
-  
-  # 检测必要软件包
-  for pkg in firewalld iptables-services; do
-    if ! rpm -q "$pkg" &>/dev/null; then
-      missing+=("$pkg")
+# 函数：检测服务状态
+check_service() {
+    if ! systemctl is-active --quiet $1; then
+        log "错误: $1 服务未运行，尝试启动..."
+        systemctl start $1
+        if [ $? -ne 0 ]; then
+            log "致命错误: 无法启动 $1 服务"
+            exit 1
+        fi
     fi
-  done
-  
-  # 自动修复缺失依赖
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "正在安装缺失依赖: ${missing[*]}..."
-    dnf install -y "${missing[@]}" || {
-      echo "依赖安装失败，请手动执行: dnf install -y ${missing[@]}" >&2
-      exit 3
-    }
-  fi
+    log "$1 服务已就绪"
 }
 
-# 配置 DNS 解析
-setup_dns() {
-  # 优先尝试使用 NetworkManager 配置全局 DNS
-  if systemctl is-active NetworkManager &>/dev/null; then
-    echo "通过 NetworkManager 配置 DNS..."
-    nmcli con mod "$PUBLIC_IFACE" ipv4.dns "${DNS_SERVERS[*]}" || true
-    nmcli con up "$PUBLIC_IFACE" || true
-  else
-    # 备选方案: 安装并配置 dnsmasq
-    if ! rpm -q dnsmasq &>/dev/null; then
-      echo "正在安装 dnsmasq..."
-      dnf install -y dnsmasq || {
-        echo "警告：dnsmasq 安装失败，将直接修改 resolv.conf" >&2
-        echo "nameserver ${DNS_SERVERS[0]}" > /etc/resolv.conf
-        return
-      }
+# 函数：检测防火墙类型
+detect_firewall() {
+    if command -v firewall-cmd &> /dev/null; then
+        FIREWALL_TYPE="firewalld"
+        log "检测到 firewalld 防火墙"
+    elif command -v iptables &> /dev/null; then
+        FIREWALL_TYPE="iptables"
+        log "检测到 iptables 防火墙"
+    else
+        log "错误: 未找到任何防火墙工具"
+        exit 1
     fi
-    
-    echo "配置 dnsmasq..."
-    cat > /etc/dnsmasq.d/public_dns.conf <<EOF
-server=${DNS_SERVERS[0]}
-server=${DNS_SERVERS[1]}
-EOF
-    systemctl enable --now dnsmasq
-  fi
-  
-  # 最终 DNS 验证
-  if ! nslookup google.com &>/dev/null; then
-    echo "警告：DNS 配置未完全生效，请手动检查" >&2
-  fi
 }
 
-# 配置内核参数
-setup_kernel() {
-  echo "配置内核参数..."
-  {
-    echo "net.ipv4.ip_forward=1"
-    echo "net.ipv4.conf.all.forwarding=1"
-    echo "net.ipv6.conf.all.forwarding=1"
-  } >> /etc/sysctl.conf
-  sysctl -p >/dev/null
+# 主配置函数
+configure_firewall() {
+    case $FIREWALL_TYPE in
+        "firewalld")
+            check_service firewalld
+            log "配置 firewalld 规则..."
+            firewall-cmd --permanent --zone=public --add-port=22/tcp
+            firewall-cmd --permanent --zone=public --add-service=http
+            firewall-cmd --permanent --zone=public --add-service=https
+            firewall-cmd --reload
+            ;;
+        "iptables")
+            check_service iptables
+            log "配置 iptables 规则..."
+            iptables -F
+            iptables -X
+            iptables -t nat -F
+            iptables -t nat -X
+            iptables -P INPUT DROP
+            iptables -P FORWARD DROP
+            iptables -A INPUT -i lo -j ACCEPT
+            iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+            iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+            iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+            iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+            iptables-save > /etc/sysconfig/iptables
+            ;;
+    esac
+    log "防火墙规则配置完成"
 }
 
-# 防火墙及 NAT 配置（多模式支持）
-setup_firewall() {
-  echo "配置防火墙规则..."
-  
-  # 尝试使用 firewalld
-  if firewall-cmd --state &>/dev/null; then
-    # 清理旧规则
-    firewall-cmd --permanent --direct --remove-rules ipv4 nat POSTROUTING || true
-    firewall-cmd --permanent --direct --remove-rules ipv4 filter FORWARD || true
-    
-    # 添加新规则
-    firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s "$PRIVATE_NET" -o "$PUBLIC_IFACE" -j MASQUERADE
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i br0 -o "$PUBLIC_IFACE" -j ACCEPT
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i "$PUBLIC_IFACE" -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-    
-    # 应用配置
-    if ! firewall-cmd --reload; then
-      echo "警告：firewalld 配置失败，尝试回退到 iptables" >&2
-      fallback_to_iptables
-    fi
-  else
-    echo "firewalld 未安装，使用 iptables 配置..."
-    fallback_to_iptables
-  fi
-}
+# 执行流程
+log "===== 防火墙配置开始 ====="
+detect_firewall
+configure_firewall
+log "===== 防火墙配置完成 ====="
 
-# iptables 回退方案
-fallback_to_iptables() {
-  echo "配置 iptables 规则..."
-  # 清理旧规则
-  iptables -t nat -F POSTROUTING
-  iptables -t filter -F FORWARD
-  
-  # 添加 NAT 规则
-  iptables -t nat -A POSTROUTING -s "$PRIVATE_NET" -o "$PUBLIC_IFACE" -j MASQUERADE
-  
-  # 添加转发规则
-  iptables -A FORWARD -i br0 -o "$PUBLIC_IFACE" -j ACCEPT
-  iptables -A FORWARD -i "$PUBLIC_IFACE" -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-  
-  # 保存规则
-  if ! service iptables save; then
-    echo "错误：iptables 规则保存失败" >&2
-    exit 3
-  fi
-}
-
-# 验证函数
-validate_setup() {
-  local errors=0
-  
-  echo -e "\n验证配置："
-  
-  # 检查 IP 转发
-  if [ "$(sysctl -n net.ipv4.ip_forward)" -ne 1 ]; then
-    echo "[错误] IP 转发未启用"
-    ((errors++))
-  fi
-  
-  # 检查 NAT 规则
-  if ! iptables -t nat -L POSTROUTING -v | grep -q MASQUERADE; then
-    echo "[错误] NAT 规则未生效"
-    ((errors++))
-  fi
-  
-  # 检查 DNS 解析
-  if ! nslookup google.com | grep -q 'Server:'; then
-    echo "[警告] DNS 解析可能存在问题"
-    ((errors++))
-  fi
-  
-  # 总结状态
-  if [ $errors -gt 0 ]; then
-    echo "验证发现 $errors 个问题，请检查日志：$LOG_FILE"
-    return 1
-  else
-    echo "所有基础检查通过 ✔"
-    return 0
-  fi
-}
-
-# 主执行流程
-main() {
-  check_dependencies
-  setup_kernel
-  setup_firewall
-  setup_dns
-  validate_setup
-}
-
-# 执行主函数
-if main; then
-  echo -e "\n[成功] 网络配置已完成！"
-  echo "请确保所有虚拟机："
-  echo "1. 网关设置为 $GATEWAY_IP"
-  echo "2. DNS 设置为 ${DNS_SERVERS[*]}"
+# 验证配置
+log "验证防火墙状态..."
+if [ "$FIREWALL_TYPE" == "firewalld" ]; then
+    firewall-cmd --list-all
 else
-  echo -e "\n[错误] 配置过程中发现问题，请检查输出日志：$LOG_FILE" >&2
-  exit 3
+    iptables -L -n -v
 fi
