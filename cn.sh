@@ -1,107 +1,93 @@
 #!/bin/bash
-set -eo pipefail
 
-# 配置参数
-IPSET_V4="china_ips_v4"
-IPSET_V6="china_ips_v6"
-CIDR_URL_V4="https://github.com/mayaxcn/china-ip-list/raw/master/chnroute.txt"
-CIDR_URL_V6="https://github.com/mayaxcn/china-ip-list/raw/master/chnroute_v6.txt"
-LOCK_FILE="/tmp/ipset.lock"
+# 清空当前所有防火墙规则
+echo "清空当前所有防火墙规则..."
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+iptables -t mangle -F
+iptables -t mangle -X
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
 
-# 检查是否安装了 ipset
-if ! command -v ipset >/dev/null 2>&1; then
-    echo -e "\033[31m[ERROR]\033[0m ipset 未安装，请安装后重试。"
-    echo "安装方法:"
-    echo "Debian/Ubuntu: sudo apt update && sudo apt install ipset"
-    echo "CentOS/Red Hat: sudo yum install ipset"
-    echo "Fedora: sudo dnf install ipset"
-    echo "Alpine: sudo apk add ipset"
+# 检查并安装必要工具
+echo "检查并安装必要工具..."
+
+#!/bin/bash
+
+# 1. 检查是否安装了 curl（使用更可靠的检测方式）
+if ! command -v curl >/dev/null 2>&1; then
+    echo "curl 未安装，正在安装..."
+    # 检查系统的包管理工具并安装curl 
+    if command -v apt-get >/dev/null 2>&1; then
+        # Debian/Ubuntu
+        apt-get update && apt-get install -y curl
+    elif command -v yum >/dev/null 2>&1; then
+        # RHEL/CentOS
+        yum install -y curl
+    else
+        echo "无法识别的 Linux 发行版，请手动安装 curl。"
+        command -v curl || echo "curl 确实未安装"
+        exit 1
+    fi
+else
+    echo "curl 已安装: $(command -v curl)"
+fi
+
+# 后续DDNS逻辑...
+
+# 检查并安装 iptables
+if ! command -v iptables &>/dev/null; then
+    apt-get update && apt-get install -y iptables
+    if [[ $? -ne 0 ]]; then
+        echo "安装 iptables 失败，请检查网络。" >&2
+        exit 1
+    fi
+fi
+
+echo "所有必要工具安装完成。"
+
+
+# 下载中国大陆 IP 列表
+CN_ZONE_URL="https://www.ipdeny.com/ipblocks/data/countries/cn.zone"
+CN_IP_FILE="/tmp/cn.zone"
+echo "下载中国大陆 IP 列表..."
+curl -o $CN_IP_FILE $CN_ZONE_URL
+if [[ $? -ne 0 ]] || [[ ! -s $CN_IP_FILE ]]; then
+    echo "下载中国大陆 IP 列表失败，请检查网络或 URL。" >&2
     exit 1
 fi
 
-# 获取IPset版本
-IPSET_VERSION=$(ipset --version | awk '{print $NF}' | cut -d'.' -f2)
-[ -z "$IPSET_VERSION" ] && IPSET_VERSION=0
+# 设置防火墙规则
+echo "设置防火墙规则..."
+# 默认策略设置为拒绝
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
 
-# 根据版本选择family参数
-if [ "$IPSET_VERSION" -ge 11 ]; then
-    V4_FAMILY="inet4"
-    V6_FAMILY="inet6"
+# 允许回环接口
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# 允许已建立的连接和相关流量
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# 加载中国大陆 IP 列表
+while read -r IP; do
+    [[ "$IP" =~ ^#.*$ || -z "$IP" ]] && continue # 跳过注释或空行
+    iptables -A INPUT -s "$IP" -j ACCEPT
+done < "$CN_IP_FILE"
+
+# 测试连接，避免锁死服务器
+echo "测试防火墙规则..."
+curl -s https://ip.sb > /dev/null
+if [[ $? -ne 0 ]]; then
+    echo "测试失败，请检查防火墙规则。" >&2
+    exit 1
 else
-    V4_FAMILY="inet"
-    V6_FAMILY="inet6"
+    echo "防火墙规则设置成功，仅允许中国大陆 IP 访问。"
 fi
 
-# 带颜色日志函数
-log() {
-    local level=$1; shift
-    local color=""
-    case $level in
-        "INFO") color='\033[32m' ;;
-        "WARN") color='\033[33m' ;;
-        "ERROR") color='\033[31m' ;;
-    esac
-    echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S') ${level}]${NC} $*"
-}
-NC='\033[0m'
-
-# 安全创建集合
-safe_create_set() {
-    local set_name=$1
-    local family=$2
-    local file=$3
-
-    # 清理旧集合
-    if ipset list -n | grep -q "^${set_name}$"; then
-        log "INFO" "清理旧集合 ${set_name}..."
-        iptables-save | grep -v "match-set ${set_name}" | iptables-restore
-        ipset destroy "${set_name}" 2>/dev/null || true
-    fi
-
-    # 创建新集合
-    log "INFO" "创建集合 ${set_name} (family: ${family})..."
-    if ! ipset create "${set_name}" hash:net family "${family}" maxelem 2000000; then
-        log "ERROR" "集合创建失败，请检查："
-        echo "1. 内核是否加载模块: sudo modprobe ip_set_hash_net"
-        echo "2. 是否具有root权限"
-        exit 1
-    fi
-
-    # 导入数据
-    log "INFO" "导入数据到 ${set_name}..."
-    sed "s/^/add ${set_name} /" "${file}" | ipset restore -exist 2>&1 | grep -v "already added"
-
-    # 验证条目
-    local count=$(ipset list "${set_name}" | grep -c "^add")
-    [ "$count" -lt 1000 ] && log "ERROR" "条目数异常" && exit 1
-    log "INFO" "成功加载 ${count} 条规则"
-}
-
-# 主流程
-main() {
-    # 检查root权限
-    [ "$(id -u)" -ne 0 ] && log "ERROR" "需要root权限运行" && exit 1
-
-    # 创建临时目录
-    WORK_DIR=$(mktemp -d)
-    trap 'rm -rf "${WORK_DIR}"' EXIT
-
-    # 下载CIDR文件
-    log "INFO" "下载CIDR列表..."
-    curl -fsSL --retry 3 -o "${WORK_DIR}/v4.txt" "${CIDR_URL_V4}"
-    curl -fsSL --retry 3 -o "${WORK_DIR}/v6.txt" "${CIDR_URL_V6}"
-
-    # 处理IPv4
-    safe_create_set "${IPSET_V4}" "${V4_FAMILY}" "${WORK_DIR}/v4.txt"
-
-    # 处理IPv6
-    safe_create_set "${IPSET_V6}" "${V6_FAMILY}" "${WORK_DIR}/v6.txt"
-
-    # 配置防火墙规则（示例）
-    iptables -A INPUT -m set --match-set "${IPSET_V4}" src -j ACCEPT
-    ip6tables -A INPUT -m set --match-set "${IPSET_V6}" src -j ACCEPT
-
-    log "INFO" "${GREEN}配置成功！"
-}
-
-main "$@"
+echo "完成！请测试服务器功能以确保一切正常。"
