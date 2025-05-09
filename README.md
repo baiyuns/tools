@@ -7,6 +7,7 @@
 ------------------------------
 curl https://raw.githubusercontent.com/baiyuns/tools/master/cfddns.sh > /root/cfddns.sh && chmod +x /root/cfddns.sh
 
+apt install nano -y
 nano cfddns.sh
 
 ./cfddns.sh
