@@ -1,5 +1,6 @@
 wget -O nginx.sh https://raw.githubusercontent.com/baiyuns/nginx/main/nginx.sh && bash nginx.sh
 
+ wget -O ql.sh https://raw.githubusercontent.com/baiyuns/tools/main/ql.sh && bash ql.sh
 
 wget https://raw.githubusercontent.com/baiyuns/tools/master/cn.sh && bash cn.sh
 
